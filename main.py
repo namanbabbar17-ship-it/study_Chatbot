@@ -8,20 +8,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-
 load_dotenv()
 
 groq_api_key = os.getenv("GROQ_API_KEY")
 mongo_uri = os.getenv("MONGODB_URI")
 
-
 client = MongoClient(mongo_uri)
 db = client["Chat"]
 collection = db["users"]
 
-
 app = FastAPI()
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,11 +27,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class ChatRequest(BaseModel):
     user_id: str
     question: str
-
 
 prompt = ChatPromptTemplate.from_messages(
     [
@@ -45,7 +39,7 @@ prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-
+# ✅ SAME MODEL (unchanged)
 llm = ChatGroq(
     api_key=groq_api_key,
     model="openai/gpt-oss-20b"
@@ -53,45 +47,47 @@ llm = ChatGroq(
 
 chain = prompt | llm
 
-
+# ✅ LIMIT HISTORY (VERY IMPORTANT)
 def get_history(user_id: str):
-    chats = collection.find({"user_id": user_id}).sort("timestamp", 1)
-    history = []
+    chats = collection.find({"user_id": user_id}).sort("timestamp", -1).limit(6)
 
-    for chat in chats:
+    history = []
+    for chat in reversed(list(chats)):  # reverse to correct order
         history.append((chat["role"], chat["message"]))
 
     return history
-
 
 @app.get("/")
 def home():
     return {"message": "Welcome to the Study Bot API 🚀"}
 
-
+# ✅ ASYNC + OPTIMIZED
 @app.post("/chat")
-def chat(request: ChatRequest):
+async def chat(request: ChatRequest):
     history = get_history(request.user_id)
 
-    response = chain.invoke({
+    # ✅ async call (faster)
+    response = await chain.ainvoke({
         "history": history,
         "question": request.question
     })
 
     now = datetime.now(timezone.utc)
 
-    collection.insert_one({
-        "user_id": request.user_id,
-        "role": "user",
-        "message": request.question,
-        "timestamp": now
-    })
-
-    collection.insert_one({
-        "user_id": request.user_id,
-        "role": "assistant",
-        "message": response.content,
-        "timestamp": now
-    })
+    # ✅ single DB call instead of 2
+    collection.insert_many([
+        {
+            "user_id": request.user_id,
+            "role": "user",
+            "message": request.question,
+            "timestamp": now
+        },
+        {
+            "user_id": request.user_id,
+            "role": "assistant",
+            "message": response.content,
+            "timestamp": now
+        }
+    ])
 
     return {"response": response.content}
